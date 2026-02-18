@@ -1,0 +1,72 @@
+{
+  "name": "Run Tests",
+  "description": "Executes comprehensive test suite with coverage reporting and result notifications.",
+  "version": "1.0.0",
+  "generated_by": "dark-factory-engine",
+  "inputs": [
+    {
+      "name": "project_path",
+      "required": true,
+      "default": null,
+      "description": "Path to the project directory"
+    },
+    {
+      "name": "test_type",
+      "required": false,
+      "default": "all",
+      "description": "Type of tests to run (default: all)"
+    },
+    {
+      "name": "coverage_threshold",
+      "required": false,
+      "default": "80",
+      "description": "Minimum coverage percentage (default: 80)"
+    },
+    {
+      "name": "notify_channels",
+      "required": false,
+      "default": null,
+      "description": "Comma-separated list of notification channels"
+    }
+  ],
+  "outputs": [
+    {
+      "name": "test_results",
+      "description": "Overall test success/failure status"
+    },
+    {
+      "name": "coverage_percentage",
+      "description": "Code coverage percentage achieved"
+    },
+    {
+      "name": "test_duration",
+      "description": "Total test execution time in seconds"
+    },
+    {
+      "name": "artifacts_path",
+      "description": "Path to generated test artifacts and reports"
+    }
+  ],
+  "guardrails": [
+    {
+      "type": "timeout",
+      "description": "Maximum test execution time of 30 minutes"
+    },
+    {
+      "type": "coverage gate",
+      "description": "Fail if coverage below threshold"
+    },
+    {
+      "type": "resource limits",
+      "description": "Maximum 2GB memory usage during tests"
+    },
+    {
+      "type": "parallel execution",
+      "description": "Maximum 4 concurrent test processes"
+    },
+    {
+      "type": "retry policy",
+      "description": "Retry flaky tests up to 2 times"
+    }
+  ]
+}
