@@ -1,0 +1,72 @@
+{
+  "name": "Deploy Service",
+  "description": "Deploys a service to Coolify with health checks and rollback capability.",
+  "version": "1.0.0",
+  "generated_by": "dark-factory-engine",
+  "inputs": [
+    {
+      "name": "service_name",
+      "required": true,
+      "default": null,
+      "description": "Name of the service to deploy"
+    },
+    {
+      "name": "git_repo",
+      "required": true,
+      "default": null,
+      "description": "Repository URL (e.g., https://github.com/user/repo)"
+    },
+    {
+      "name": "branch",
+      "required": false,
+      "default": "main",
+      "description": "Git branch (default: main)"
+    },
+    {
+      "name": "environment",
+      "required": false,
+      "default": "staging",
+      "description": "Target environment (default: staging)"
+    }
+  ],
+  "outputs": [
+    {
+      "name": "deployment_url",
+      "description": "Live service URL"
+    },
+    {
+      "name": "health_status",
+      "description": "Service health check result"
+    },
+    {
+      "name": "deployment_id",
+      "description": "Coolify deployment identifier"
+    },
+    {
+      "name": "rollback_command",
+      "description": "Command to rollback deployment"
+    }
+  ],
+  "guardrails": [
+    {
+      "type": "timeout",
+      "description": "Maximum deployment time of 10 minutes"
+    },
+    {
+      "type": "auto-rollback",
+      "description": "Automatic rollback on health check failure"
+    },
+    {
+      "type": "approval",
+      "description": "Production deployments require manual approval"
+    },
+    {
+      "type": "rate limiting",
+      "description": "Maximum 5 deployments per hour per service"
+    },
+    {
+      "type": "verification",
+      "description": "All deployments must pass health checks"
+    }
+  ]
+}

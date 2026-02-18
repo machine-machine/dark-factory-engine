@@ -1,0 +1,85 @@
+#!/usr/bin/env python3
+"""
+Dark Factory Workflow Compiler
+Compiles Markdown workflow definitions into OpenClaw skills
+"""
+
+import sys
+import os
+from pathlib import Path
+
+# Add the project root to Python path
+project_root = Path(__file__).parent.parent
+sys.path.insert(0, str(project_root))
+
+from compiler.parser import WorkflowParser
+from compiler.generator import SkillGenerator
+
+
+def main():
+    if len(sys.argv) < 2:
+        print("Usage: ./bin/compile <workflow.md> [output_dir]")
+        print("\nExamples:")
+        print("  ./bin/compile workflow-templates/deploy-service.md")
+        print("  ./bin/compile workflow-templates/deploy-service.md ./output/")
+        sys.exit(1)
+    
+    workflow_file = sys.argv[1]
+    output_dir = sys.argv[2] if len(sys.argv) > 2 else "./output"
+    
+    # Validate input file
+    if not Path(workflow_file).exists():
+        print(f"Error: Workflow file not found: {workflow_file}")
+        sys.exit(1)
+    
+    try:
+        print(f"📄 Parsing workflow: {workflow_file}")
+        
+        # Parse the workflow
+        parser = WorkflowParser()
+        workflow = parser.parse_file(workflow_file)
+        
+        print(f"✅ Parsed workflow: {workflow.name}")
+        print(f"   Description: {workflow.description.strip()}")
+        print(f"   Inputs: {len(workflow.inputs)}")
+        print(f"   Steps: {len(workflow.steps)}")
+        print(f"   Outputs: {len(workflow.outputs)}")
+        print()
+        
+        print(f"🔧 Generating OpenClaw skill...")
+        
+        # Generate the skill
+        generator = SkillGenerator()
+        skill_dir = generator.generate_skill(workflow, output_dir)
+        
+        print(f"✅ Generated skill at: {skill_dir}")
+        print("\nGenerated files:")
+        
+        for file_path in sorted(Path(skill_dir).rglob("*")):
+            if file_path.is_file():
+                size = file_path.stat().st_size
+                print(f"   {file_path.relative_to(skill_dir)} ({size} bytes)")
+        
+        print(f"\n🚀 To test the skill:")
+        print(f"   cd {skill_dir}")
+        print("   ./skill.sh --help")
+        
+        # Show example usage
+        if workflow.inputs:
+            print(f"\n💡 Example usage:")
+            print(f"   ./skill.sh \\")
+            for inp in workflow.inputs:
+                if inp.required:
+                    print(f"     --{inp.name} <value> \\")
+            print()
+        
+    except Exception as e:
+        print(f"❌ Error: {e}")
+        if "--debug" in sys.argv:
+            import traceback
+            traceback.print_exc()
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
