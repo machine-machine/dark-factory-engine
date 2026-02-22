@@ -1,0 +1,25 @@
+services:
+  spacetimedb:
+    image: clockworklabs/spacetimedb:latest
+    container_name: spacetimedb
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    volumes:
+      - spacetimedb_data:/stdb
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    networks:
+      - coolify
+
+volumes:
+  spacetimedb_data:
+    name: spacetimedb_data
+
+networks:
+  coolify:
+    external: true
