@@ -31,14 +31,20 @@ The Dark Factory Engine converts human-readable workflow definitions (Markdown) 
 ## Quick Start
 
 ```bash
-# Compile a workflow template
+# 1. Compile a workflow template
 ./bin/compile workflow-templates/deploy-service.md
 
-# Deploy to Coolify (auto-generates app)
+# 2. Dry-run — see what would happen
+./bin/deploy output/deploy-service-skill/ --dry-run
+
+# 3. Deploy to Coolify (git push + app create + deploy)
 ./bin/deploy output/deploy-service-skill/
 
-# Monitor execution
-./bin/monitor deploy-service
+# 4. Monitor deployed skills
+./bin/monitor                          # list all df-* apps
+./bin/monitor deploy-service           # specific skill status
+./bin/monitor deploy-service --logs    # tail logs
+./bin/monitor --registry               # local deployment registry
 ```
 
 ## Workflow Template Format
@@ -109,8 +115,9 @@ dark-factory-engine/
 ### Phase 1 (Current)
 - [x] Workflow template parsing
 - [x] Basic skill generation
-- [ ] Coolify integration
-- [ ] Simple execution engine
+- [x] Coolify integration (`bin/deploy` — git push + app create + deploy)
+- [x] Deployment monitor (`bin/monitor` — live status + logs)
+- [ ] Execution engine (skill triggering via HTTP or cron)
 
 ### Phase 2 (Planned)
 - [ ] Meta-agent monitoring

@@ -1,0 +1,327 @@
+#!/usr/bin/env python3
+"""
+Dark Factory — Skill Deployer
+Pushes a compiled skill to GitHub + creates/updates Coolify app
+"""
+
+import sys
+import os
+import json
+import subprocess
+import argparse
+import shutil
+import time
+import re
+from pathlib import Path
+
+# ── Config ──────────────────────────────────────────────────────────────────
+COOLIFY_CONFIG = Path.home() / ".config/coolify/config"
+GITHUB_REPO = "https://github.com/machine-machine/dark-factory-engine"
+GITHUB_REPO_SLUG = "machine-machine/dark-factory-engine"
+SERVER_UUID = "vw8k84s4swgoc4w0sswkgwc4"
+PROJECT_UUID = "q8w4cwskgwkgg0cg00k00coo"   # machine.machine
+COOLIFY_DOMAIN = "machinemachine.ai"
+MAX_WAIT_S = 180
+
+# ── Helpers ──────────────────────────────────────────────────────────────────
+def ok(msg):   print(f"  ✅ {msg}")
+def err(msg):  print(f"  ❌ {msg}", file=sys.stderr)
+def info(msg): print(f"  ℹ️  {msg}")
+def step(n, total, msg): print(f"[{n}/{total}] {msg}...", end="", flush=True)
+def done_step(msg=""): print(f"  ✅ {msg}")
+def fail_step(msg=""):
+    print(f"  ❌ {msg}")
+    sys.exit(1)
+
+def run(cmd, cwd=None, capture=False, check=True):
+    r = subprocess.run(cmd, shell=True, cwd=cwd,
+                       capture_output=capture, text=True)
+    if check and r.returncode != 0:
+        raise RuntimeError(f"Command failed: {cmd}\n{r.stderr}")
+    return r
+
+def load_coolify_config():
+    cfg = {}
+    with open(COOLIFY_CONFIG) as f:
+        for line in f:
+            line = line.strip()
+            if '=' in line and not line.startswith('#'):
+                k, v = line.split('=', 1)
+                cfg[k.strip()] = v.strip().strip('"\'')
+    return cfg
+
+def coolify_api(method, endpoint, data=None, cfg=None):
+    import urllib.request, urllib.error
+    url = f"{cfg['COOLIFY_API_URL']}{endpoint}"
+    headers = {
+        "Authorization": f"Bearer {cfg['COOLIFY_TOKEN']}",
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
+    body = json.dumps(data).encode() if data else None
+    req = urllib.request.Request(url, data=body, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            return json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        body = e.read().decode()
+        raise RuntimeError(f"Coolify API {method} {endpoint} → HTTP {e.code}: {body}")
+
+def normalize_name(name):
+    return re.sub(r'[^a-z0-9-]', '-', name.lower().replace(' ', '-')).strip('-')
+
+def generate_dockerfile(skill_dir: Path, skill_name: str):
+    content = f"""FROM ubuntu:22.04
+LABEL dark-factory.skill="{skill_name}"
+RUN apt-get update && \\
+    apt-get install -y bash jq curl git && \\
+    rm -rf /var/lib/apt/lists/*
+WORKDIR /skill
+COPY . .
+RUN chmod +x skill.sh functions.sh 2>/dev/null || true
+# Health check endpoint (simple nc-based)
+HEALTHCHECK --interval=30s --timeout=5s --retries=3 \\
+    CMD pgrep -x skill.sh > /dev/null || exit 0
+ENTRYPOINT ["/bin/bash", "skill.sh"]
+"""
+    (skill_dir / "Dockerfile").write_text(content)
+
+def push_to_branch(skill_dir: Path, skill_name: str, dry_run: bool):
+    """Copy skill into dark-factory-engine repo under deployed/<skill-name>/ on a dedicated branch"""
+    repo_dir = Path(__file__).parent.parent.resolve()
+    branch = f"deployed/{skill_name}"
+    deploy_subdir = repo_dir / "deployed" / skill_name
+
+    if dry_run:
+        info(f"Would push to branch '{branch}' → deployed/{skill_name}/")
+        return branch
+
+    # Ensure we're on master first
+    run("git fetch origin", cwd=repo_dir)
+    current = run("git branch --show-current", cwd=repo_dir, capture=True).stdout.strip()
+
+    # Create/reset branch from master
+    branches = run("git branch -a", cwd=repo_dir, capture=True).stdout
+    if f"remotes/origin/{branch}" in branches:
+        run(f"git checkout -B {branch} origin/{branch}", cwd=repo_dir)
+    else:
+        run(f"git checkout -B {branch} origin/master", cwd=repo_dir)
+
+    # Copy skill files
+    if deploy_subdir.exists():
+        shutil.rmtree(deploy_subdir)
+    shutil.copytree(skill_dir, deploy_subdir)
+
+    # Stage + commit
+    run("git add -A", cwd=repo_dir)
+    status = run("git status --porcelain", cwd=repo_dir, capture=True).stdout.strip()
+    if status:
+        run(f'git commit -m "deploy: {skill_name} v1.0.0"', cwd=repo_dir)
+        run(f"git push origin {branch}", cwd=repo_dir)
+    else:
+        info("No changes to commit — branch already up to date")
+
+    # Return to original branch
+    run(f"git checkout {current}", cwd=repo_dir)
+    return branch
+
+def create_or_get_coolify_app(skill_name, app_name, fqdn, branch, cfg, dry_run):
+    """Create Coolify app if it doesn't exist; return uuid"""
+    if dry_run:
+        info(f"Would create Coolify app '{app_name}' → {fqdn}")
+        return "dry-run-uuid"
+
+    # Check if app already exists
+    try:
+        apps = coolify_api("GET", "/applications", cfg=cfg)
+        for app in (apps if isinstance(apps, list) else apps.get("data", [])):
+            if app.get("name") == app_name:
+                info(f"App '{app_name}' already exists (uuid: {app['uuid']})")
+                return app["uuid"]
+    except Exception:
+        pass  # If listing fails, try to create
+
+    payload = {
+        "git_repository": GITHUB_REPO,
+        "git_branch": branch,
+        "git_commit_sha": "HEAD",
+        "base_directory": f"/deployed/{skill_name}",
+        "dockerfile_location": "/Dockerfile",
+        "build_pack": "dockerfile",
+        "name": app_name,
+        "description": f"Dark Factory skill: {skill_name}",
+        "domains": fqdn,
+        "server_uuid": SERVER_UUID,
+        "project_uuid": PROJECT_UUID,
+        "environment_name": "production",
+        "instant_deploy": False,
+        "ports_exposes": "",
+    }
+
+    result = coolify_api("POST", "/applications/public", data=payload, cfg=cfg)
+    return result.get("uuid") or result.get("data", {}).get("uuid")
+
+def set_env_vars(app_uuid, env_vars, cfg, dry_run):
+    if not env_vars:
+        return
+    for kv in env_vars:
+        if '=' not in kv:
+            continue
+        k, v = kv.split('=', 1)
+        if dry_run:
+            info(f"Would set env: {k}=***")
+            continue
+        try:
+            coolify_api("POST", f"/applications/{app_uuid}/envs",
+                       data={"key": k, "value": v, "is_preview": False}, cfg=cfg)
+        except Exception as e:
+            info(f"Env var {k}: {e}")
+
+def trigger_deploy(app_uuid, cfg, dry_run):
+    if dry_run:
+        info("Would trigger deployment")
+        return
+    coolify_api("GET", f"/deploy?uuid={app_uuid}&force=false", cfg=cfg)
+
+def wait_for_health(app_uuid, cfg, dry_run):
+    if dry_run:
+        info("Would wait for health check")
+        return "running"
+    start = time.time()
+    while time.time() - start < MAX_WAIT_S:
+        try:
+            r = coolify_api("GET", f"/applications/{app_uuid}", cfg=cfg)
+            status = r.get("status", "")
+            if "running" in status or "healthy" in status:
+                return status
+            if "failed" in status or "error" in status:
+                return status
+        except Exception:
+            pass
+        time.sleep(5)
+    return "timeout"
+
+# ── Main ─────────────────────────────────────────────────────────────────────
+def main():
+    parser = argparse.ArgumentParser(description="Dark Factory — deploy skill to Coolify")
+    parser.add_argument("skill_dir", help="Path to compiled skill directory")
+    parser.add_argument("--env", action="append", default=[], metavar="KEY=VALUE",
+                        help="Environment variable (repeatable)")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="Show deployment plan without executing")
+    args = parser.parse_args()
+
+    skill_dir = Path(args.skill_dir).resolve()
+    if not skill_dir.exists():
+        print(f"❌ Skill directory not found: {skill_dir}")
+        sys.exit(1)
+
+    config_file = skill_dir / "config.json"
+    if not config_file.exists():
+        print(f"❌ config.json not found in {skill_dir}")
+        sys.exit(1)
+
+    config = json.loads(config_file.read_text())
+    raw_name = config.get("name", skill_dir.name)
+    skill_name = normalize_name(raw_name)
+    app_name = f"df-{skill_name}"[:32]
+    fqdn = f"http://{app_name}.{COOLIFY_DOMAIN}"
+    branch = f"deployed/{skill_name}"
+
+    TOTAL = 5
+
+    print()
+    print(f"🏭 Dark Factory Deploy{'  [DRY RUN]' if args.dry_run else ''}")
+    print(f"   Skill:   {raw_name}")
+    print(f"   App:     {app_name}")
+    print(f"   Branch:  {branch}")
+    print(f"   URL:     {fqdn}")
+    print()
+
+    # Load Coolify config
+    try:
+        cfg = load_coolify_config()
+    except Exception as e:
+        print(f"❌ Failed to load Coolify config: {e}")
+        sys.exit(1)
+
+    # Step 1 — Generate Dockerfile
+    step(1, TOTAL, "Generating Dockerfile")
+    try:
+        generate_dockerfile(skill_dir, skill_name)
+        done_step()
+    except Exception as e:
+        fail_step(str(e))
+
+    # Step 2 — Push to git branch
+    step(2, TOTAL, f"Pushing to git branch '{branch}'")
+    try:
+        actual_branch = push_to_branch(skill_dir, skill_name, args.dry_run)
+        done_step(f"branch: {actual_branch}")
+    except Exception as e:
+        fail_step(str(e))
+
+    # Step 3 — Create Coolify app
+    step(3, TOTAL, f"Creating Coolify app '{app_name}'")
+    try:
+        app_uuid = create_or_get_coolify_app(skill_name, app_name, fqdn, branch, cfg, args.dry_run)
+        done_step(f"uuid: {app_uuid}")
+    except Exception as e:
+        fail_step(str(e))
+
+    # Step 4 — Set env vars
+    if args.env:
+        step(4, TOTAL, "Setting environment variables")
+        try:
+            set_env_vars(app_uuid, args.env, cfg, args.dry_run)
+            done_step(f"{len(args.env)} vars")
+        except Exception as e:
+            fail_step(str(e))
+    else:
+        step(4, TOTAL, "Environment variables")
+        done_step("(none)")
+
+    # Step 5 — Deploy + wait
+    step(5, TOTAL, "Triggering deployment")
+    try:
+        trigger_deploy(app_uuid, cfg, args.dry_run)
+        done_step()
+    except Exception as e:
+        fail_step(str(e))
+
+    if not args.dry_run:
+        print()
+        info("Waiting for health check (up to 3 min)...")
+        health = wait_for_health(app_uuid, cfg, args.dry_run)
+        status_icon = "🟢" if "running" in health or "healthy" in health else "🟡"
+        print(f"\n{status_icon} Deployed: {fqdn}")
+    else:
+        print(f"\n🟢 Dry run complete — ready to deploy: {fqdn}")
+
+    print(f"   App UUID: {app_uuid}")
+    print(f"   Branch:   {branch}")
+    print()
+
+    # Save deployment registry
+    registry_file = Path(__file__).parent.parent / "deployed" / "registry.json"
+    registry_file.parent.mkdir(exist_ok=True)
+    registry = {}
+    if registry_file.exists():
+        try:
+            registry = json.loads(registry_file.read_text())
+        except Exception:
+            pass
+    registry[skill_name] = {
+        "app_uuid": app_uuid,
+        "app_name": app_name,
+        "branch": branch,
+        "fqdn": fqdn,
+        "deployed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
+    if not args.dry_run:
+        registry_file.write_text(json.dumps(registry, indent=2))
+        info(f"Registry updated: deployed/registry.json")
+
+
+if __name__ == "__main__":
+    main()

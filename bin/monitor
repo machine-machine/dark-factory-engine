@@ -1,0 +1,166 @@
+#!/usr/bin/env bash
+# Dark Factory — Skill Monitor
+# Usage:
+#   ./bin/monitor                      # list all deployed df-* apps
+#   ./bin/monitor <skill-name>         # status of one skill
+#   ./bin/monitor <skill-name> --logs  # tail deployment logs
+#   ./bin/monitor --registry           # show local deployment registry
+
+set -uo pipefail
+
+COOLIFY_CONFIG="$HOME/.config/coolify/config"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REGISTRY="$SCRIPT_DIR/../deployed/registry.json"
+
+# ── Load config ──────────────────────────────────────────────────────────────
+if [[ ! -f "$COOLIFY_CONFIG" ]]; then
+  echo "❌ Coolify config not found: $COOLIFY_CONFIG"
+  exit 1
+fi
+source "$COOLIFY_CONFIG"
+
+api() {
+  local method="$1" endpoint="$2"
+  shift 2
+  curl -sf \
+    -X "$method" \
+    -H "Authorization: Bearer $COOLIFY_TOKEN" \
+    -H "Accept: application/json" \
+    -H "Content-Type: application/json" \
+    "$COOLIFY_API_URL$endpoint" \
+    "$@" 2>/dev/null
+}
+
+status_icon() {
+  local s="$1"
+  case "$s" in
+    *running*|*healthy*) echo "🟢" ;;
+    *stopped*|*exited*)  echo "⚫" ;;
+    *starting*|*deploy*) echo "🟡" ;;
+    *failed*|*error*)    echo "🔴" ;;
+    *)                   echo "⚪" ;;
+  esac
+}
+
+# ── Parse args ───────────────────────────────────────────────────────────────
+SKILL_FILTER=""
+SHOW_LOGS=false
+SHOW_REGISTRY=false
+
+for arg in "$@"; do
+  case "$arg" in
+    --logs)     SHOW_LOGS=true ;;
+    --registry) SHOW_REGISTRY=true ;;
+    --*)        echo "Unknown flag: $arg"; exit 1 ;;
+    *)          SKILL_FILTER="$arg" ;;
+  esac
+done
+
+# ── Registry mode ─────────────────────────────────────────────────────────────
+if [[ "$SHOW_REGISTRY" == true ]]; then
+  if [[ ! -f "$REGISTRY" ]]; then
+    echo "No deployments yet. Registry not found."
+    exit 0
+  fi
+  echo ""
+  echo "🏭 Dark Factory — Deployment Registry"
+  echo "──────────────────────────────────────────────────────"
+  python3 -c "
+import json, sys
+data = json.load(open('$REGISTRY'))
+for name, info in data.items():
+    print(f\"  {name}\")
+    print(f\"    App:      {info.get('app_name','?')}\")
+    print(f\"    UUID:     {info.get('app_uuid','?')}\")
+    print(f\"    Branch:   {info.get('branch','?')}\")
+    print(f\"    URL:      {info.get('fqdn','?')}\")
+    print(f\"    Deployed: {info.get('deployed_at','?')}\")
+    print()
+"
+  exit 0
+fi
+
+# ── Fetch all apps ────────────────────────────────────────────────────────────
+echo ""
+echo "🏭 Dark Factory — Live Status"
+echo "──────────────────────────────────────────────────────"
+
+APPS_JSON=$(api GET /applications 2>/dev/null)
+if [[ -z "$APPS_JSON" ]]; then
+  echo "❌ Could not reach Coolify API"
+  exit 1
+fi
+
+# Filter to df-* apps (or specific skill)
+if [[ -n "$SKILL_FILTER" ]]; then
+  TARGET="df-$SKILL_FILTER"
+  FILTER_EXPR="[.[] | select(.name == \"$TARGET\" or .name == \"df-$SKILL_FILTER\")]"
+else
+  FILTER_EXPR='[.[] | select(.name | startswith("df-"))]'
+fi
+
+MATCHING=$(echo "$APPS_JSON" | python3 -c "
+import json, sys
+apps = json.load(sys.stdin)
+if isinstance(apps, dict):
+    apps = apps.get('data', [])
+target = '$SKILL_FILTER'
+filtered = [a for a in apps if a.get('name','').startswith('df-')]
+if target:
+    filtered = [a for a in filtered if a.get('name') == f'df-{target}']
+for a in filtered:
+    name = a.get('name','?')
+    uuid = a.get('uuid','?')
+    status = a.get('status', 'unknown')
+    fqdn = a.get('fqdn','').replace('http://','').replace('https://','')
+    updated = a.get('updated_at', a.get('created_at','?'))[:10] if a.get('updated_at') or a.get('created_at') else '?'
+    print(f'{uuid}|{name}|{status}|{fqdn}|{updated}')
+" 2>/dev/null)
+
+if [[ -z "$MATCHING" ]]; then
+  if [[ -n "$SKILL_FILTER" ]]; then
+    echo "  No deployed skill found: $SKILL_FILTER"
+  else
+    echo "  No deployed Dark Factory skills found (df-* apps)"
+  fi
+  echo ""
+  exit 0
+fi
+
+while IFS='|' read -r uuid name status fqdn updated; do
+  icon=$(status_icon "$status")
+  printf "  %s  %-28s  %-12s  %s\n" "$icon" "$name" "$status" "$fqdn"
+  printf "       uuid: %s  deployed: %s\n" "$uuid" "$updated"
+  echo ""
+done <<< "$MATCHING"
+
+# ── Log mode ──────────────────────────────────────────────────────────────────
+if [[ "$SHOW_LOGS" == true ]]; then
+  if [[ -z "$SKILL_FILTER" ]]; then
+    echo "❌ --logs requires a skill name: ./bin/monitor <skill-name> --logs"
+    exit 1
+  fi
+
+  APP_UUID=$(echo "$MATCHING" | head -1 | cut -d'|' -f1)
+  if [[ -z "$APP_UUID" ]]; then
+    echo "❌ Skill not found: $SKILL_FILTER"
+    exit 1
+  fi
+
+  echo ""
+  echo "📋 Logs for df-$SKILL_FILTER (uuid: $APP_UUID)"
+  echo "──────────────────────────────────────────────────────"
+  LOG_RESP=$(api GET "/applications/$APP_UUID/logs" 2>/dev/null)
+  if [[ -z "$LOG_RESP" ]]; then
+    echo "  (no logs available or app not running)"
+  else
+    echo "$LOG_RESP" | python3 -c "
+import json, sys
+r = json.load(sys.stdin)
+logs = r.get('logs', r) if isinstance(r, dict) else r
+print(str(logs)[-4000:] if len(str(logs)) > 4000 else str(logs))
+"
+  fi
+fi
+
+echo ""
